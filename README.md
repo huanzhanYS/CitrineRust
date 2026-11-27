@@ -8,8 +8,6 @@
 
 > **许可 License**：MIT © huanzhanYS & CitrineRust contributors；基于 Horizon © Ludovic Marie & Horizon contributors (MIT)。`resources/` 内的 Minecraft 数据归 Mojang/Microsoft 所有，请遵守其 EULA。
 
-> **📦 下载完整服务端 / Download**: 编译好的二进制（116 MB）与 26.3 游戏资源超过 GitHub 单文件 100 MB 限制，请到 [**Releases**](https://github.com/huanzhanYS/CitrineRust/releases) 下载 `CitrineRust-github.zip`（解压即用）；源码改动见 [`docs/`](docs/)。
-
 ## 快速开始 / Quick Start
 
 ```bash
@@ -127,7 +125,9 @@ Web 管理面板默认 `http://127.0.0.1:8130`（仅本机）。控制 API 地�
 
 ## 环境要求
 
-Linux x86_64（本包在 Ubuntu 22.04 编译验证）。运行需要的系统库：`libudev`、`libasound2`、`libxkbcommon`、`pkg-config`。若启动报 `error while loading shared libraries`，安装对应库即可，例如：
+Linux x86_64。二进制在 **Ubuntu 20.04（glibc 2.31）** 编译，最高仅需 `GLIBC_2.30`，兼容 Ubuntu 20.04/22.04/24.04、Debian 11+ 及绝大多数面板容器（如 Pterodactyl/Pelican、简幻欢等）。若旧版曾报 `version 'GLIBC_2.39' not found`，请用本修复版。
+
+运行需要的系统库：`libudev`、`libasound2`、`libxkbcommon`、`pkg-config`。若启动报 `error while loading shared libraries`，安装对应库即可，例如：
 
 ```bash
 sudo apt-get install -y libudev1 libasound2 libxkbcommon0

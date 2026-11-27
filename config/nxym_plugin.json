@@ -1,0 +1,7 @@
+{
+  "auth_enabled": true,
+  "kick_unlogged_after_seconds": 90,
+  "remind_every_seconds": 20,
+  "case_insensitive_name": true,
+  "min_password_length": 4
+}

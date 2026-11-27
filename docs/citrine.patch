@@ -1,0 +1,422 @@
+diff --git a/crates/horizon-client-lib/Cargo.toml b/crates/horizon-client-lib/Cargo.toml
+index 435cc13..1f72401 100644
+--- a/crates/horizon-client-lib/Cargo.toml
++++ b/crates/horizon-client-lib/Cargo.toml
+@@ -114,6 +114,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+ 
+ [features]
+ default = ["audio", "controllers"]
++# nxym: JSON 声明式插件系统（用户版开启；GitHub 版关闭以去掉插件代码）。
++nxym-plugin = []
+ # Dev-only: the ignored tracker-send benchmark uses the executable's allocator.
+ tracker-send-bench = []
+ # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
+diff --git a/crates/horizon-client/Cargo.toml b/crates/horizon-client/Cargo.toml
+index 1542f06..5a263b7 100644
+--- a/crates/horizon-client/Cargo.toml
++++ b/crates/horizon-client/Cargo.toml
+@@ -123,6 +123,8 @@ libc = "0.2"
+ 
+ [features]
+ default = ["audio", "controllers", "horizon-extras"]
++# nxym: JSON 声明式插件系统（用户版开启；GitHub 版关闭以去掉插件代码）。
++nxym-plugin = ["horizon-client-lib/nxym-plugin"]
+ # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
+ # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).
+ audio = ["horizon-client-render/audio", "horizon-client-lib/audio"]
+diff --git a/crates/horizon-client/src/client_lib.rs b/crates/horizon-client/src/client_lib.rs
+index c84ba04..c2bace6 100644
+--- a/crates/horizon-client/src/client_lib.rs
++++ b/crates/horizon-client/src/client_lib.rs
+@@ -2,7 +2,10 @@
+ //! bindings between the validated simulation pieces and the game loop.
+ #![forbid(unsafe_code)]
+ extern crate self as horizon_client;
++pub mod accounts;
+ pub mod advancements;
++#[cfg(feature = "nxym-plugin")]
++pub mod plugin;
+ pub mod ambience;
+ pub mod animate_tick;
+ pub mod arrows;
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+index 87c5044..4f0ceff 100644
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -1080,6 +1080,10 @@ impl Game<'_> {
+                 })
+             },
+         ));
++        // nxym: 自定义启动横幅（编译进服务端本体，不再依赖 start.sh 打印）。
++        for line in crate::accounts::BANNER {
++            log("INFO", line);
++        }
+         log(
+             "INFO",
+             &format!(
+@@ -1139,6 +1143,16 @@ impl Game<'_> {
+         lists.player_idle_timeout = props.player_idle_timeout;
+         let lists = Arc::new(Mutex::new(lists));
+         self.server_lists = Some(lists.clone());
++        // nxym: 启用内置登录/注册系统并从 config/nxym_users.json 加载账号。
++        crate::accounts::enable();
++        log("INFO", "nxym: 登录/注册系统已启用 (Auth 内置)");
++        #[cfg(feature = "nxym-plugin")]
++        {
++            crate::plugin::init();
++            if crate::plugin::active() {
++                log("INFO", "nxym: JSON 插件系统已启用 (plugin/)");
++            }
++        }
+         log("INFO", &format!("Preparing level \"{level_name}\""));
+         let folder = world_dir.to_string_lossy().into_owned();
+         // The mods' common and server configs, read before the server starts.
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+index ce29dab..78884f5 100644
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -2911,6 +2911,10 @@ impl Game<'_> {
+         let Some(g) = host.hub.guest_mut(conn) else {
+             return;
+         };
++        // nxym 登录系统: dedicated server 要求玩家先认证才能游戏。fake player（机器人的分身）不受限。
++        if crate::accounts::enabled() && !g.fake {
++            g.authenticated = false;
++        }
+         // PlayerList.loadPlayerData: the owner gets the world's player file,
+         // everyone else their own.
+         let known = match owner.filter(|o| o.uuid == g.uuid) {
+@@ -3031,6 +3035,38 @@ impl Game<'_> {
+         if elsewhere && let Err(e) = self.enter_level(Some(host), back) {
+             log::error!("could not reopen {}: {e}", back.id());
+         }
++        // nxym: 向需要认证的玩家发送欢迎与登录提示。
++        if crate::accounts::enabled()
++            && let Some(g) = host.hub.guest(conn)
++            && !g.authenticated
++        {
++            let (name, registered) = (g.name.clone(), crate::accounts::is_registered(&g.name));
++            let hint = if registered {
++                format!("§e[ nxym ] 欢迎 {name}！请输入 §f/login <密码> §e登录。")
++            } else {
++                format!("§e[ nxym ] 欢迎 {name}！请输入 §f/register <密码> §e注册账号（至少 4 位）。")
++            };
++            host.hub.send_to(
++                conn,
++                &horizon_protocol::packets::play::Clientbound::SystemChat(
++                    horizon_protocol::packets::play::SystemChat {
++                        content: horizon_client::lan::data::component_nbt(
++                            &horizon_client::text::Text::legacy(&hint).component(),
++                        ),
++                        overlay: false,
++                    },
++                ),
++            );
++        }
++        // nxym 插件: on_join 钩子。
++        #[cfg(feature = "nxym-plugin")]
++        if crate::plugin::active()
++            && let Some(g) = host.hub.guest(conn)
++        {
++            let (name, uuid) = (g.name.clone(), g.uuid);
++            let actions = crate::plugin::join_actions(&name, &uuid.to_string());
++            host.hub.run_plugin_actions(conn, &actions);
++        }
+     }
+ 
+     /// Level events the game queued, for the guests (`process_level_events`).
+diff --git a/crates/horizon-client/src/game/lan_actions.rs b/crates/horizon-client/src/game/lan_actions.rs
+index 9c835ff..9fe550e 100644
+--- a/crates/horizon-client/src/game/lan_actions.rs
++++ b/crates/horizon-client/src/game/lan_actions.rs
+@@ -3574,6 +3574,59 @@ impl Game<'_> {
+         if self.guest_message_command(host, conn, command, signed.as_ref()) {
+             return;
+         }
++        // nxym 登录系统: 未认证玩家只能使用认证命令，其余一律拒绝并提示。
++        if crate::accounts::enabled()
++            && host
++                .hub
++                .guest(conn)
++                .is_some_and(|g| !g.authenticated)
++        {
++            let (name, ip) = host
++                .hub
++                .guest(conn)
++                .map(|g| (g.name.clone(), g.address.ip().to_string()))
++                .unwrap_or_default();
++            if crate::accounts::is_auth_command(command) {
++                let (lines, ok) = crate::accounts::handle_line(&name, &ip, command);
++                if ok {
++                    if let Some(g) = host.hub.guest_mut(conn) {
++                        g.authenticated = true;
++                    }
++                }
++                for line in lines {
++                    host.hub.send_to(
++                        conn,
++                        &C::SystemChat(play::SystemChat {
++                            content: horizon_client::lan::data::component_nbt(&horizon_client::text::Text::legacy(&line).component()),
++                            overlay: false,
++                        }),
++                    );
++                }
++            } else {
++                host.hub.send_to(
++                    conn,
++                    &C::SystemChat(play::SystemChat {
++                        content: horizon_client::lan::data::component_nbt(&horizon_client::text::Text::legacy(
++                            "§c[ nxym ] 请先输入 /register <密码> 注册或 /login <密码> 登录",
++                        ).component()),
++                        overlay: false,
++                    }),
++                );
++            }
++            return;
++        }
++        // nxym 插件: 自定义命令（仅已认证玩家；未认证玩家在上面已被拦下）。
++        #[cfg(feature = "nxym-plugin")]
++        if crate::plugin::is_plugin_command(command)
++            && let Some((pname, puuid)) = host
++                .hub
++                .guest(conn)
++                .map(|g| (g.name.clone(), g.uuid))
++        {
++            let actions = crate::plugin::command_actions(command, &pname, &puuid.to_string());
++            host.hub.run_plugin_actions(conn, &actions);
++            return;
++        }
+         // ListPlayersCommand needs no permission and lists every player.
+         let words: Vec<&str> = command.trim_start_matches('/').split(' ').collect();
+         if words[0] == "list" && (words.len() == 1 || words[1..] == ["uuids"]) {
+diff --git a/crates/horizon-client/src/lan/containers.rs b/crates/horizon-client/src/lan/containers.rs
+index f658e67..991a0a5 100644
+--- a/crates/horizon-client/src/lan/containers.rs
++++ b/crates/horizon-client/src/lan/containers.rs
+@@ -62,7 +62,52 @@ pub(super) fn captured_sound_range(sound: &crate::audio::CapturedSound) -> f64 {
+     })
+ }
+ 
++/// 去掉 `§` 颜色码，用于插件消息打印到控制台。
++#[cfg(feature = "nxym-plugin")]
++fn strip_legacy(s: &str) -> String {
++    let mut out = String::with_capacity(s.len());
++    let mut chars = s.chars();
++    while let Some(c) = chars.next() {
++        if c == '§' {
++            chars.next();
++        } else {
++            out.push(c);
++        }
++    }
++    out
++}
++
+ impl Hub {
++    /// nxym 插件系统：执行一组动作。`conn` 是触发玩家的连接（给 `player` 目标用）；
++    /// `broadcast` 给所有已放置玩家，`console` 写服务端日志。
++    #[cfg(feature = "nxym-plugin")]
++    pub fn run_plugin_actions(&self, conn: u32, actions: &[crate::plugin::Action]) {
++        if actions.is_empty() {
++            return;
++        }
++        for action in actions {
++            let text = &action.text;
++            match action.target.as_str() {
++                "console" => log::info!("[nxym-plugin] {}", strip_legacy(text)),
++                "broadcast" => self.broadcast(&C::SystemChat(play::SystemChat {
++                    content: crate::lan::data::component_nbt(
++                        &crate::text::Text::legacy(text).component(),
++                    ),
++                    overlay: false,
++                })),
++                _ => self.send_to(
++                    conn,
++                    &C::SystemChat(play::SystemChat {
++                        content: crate::lan::data::component_nbt(
++                            &crate::text::Text::legacy(text).component(),
++                        ),
++                        overlay: false,
++                    }),
++                ),
++            }
++        }
++    }
++
+     pub fn send_to(&self, conn: u32, packet: &C) {
+         if let Some(g) = self.guest(conn) {
+             if let C::RemoveEntities(p) = packet {
+diff --git a/crates/horizon-client/src/lan/guest.rs b/crates/horizon-client/src/lan/guest.rs
+index 25fdbb8..b56bc7e 100644
+--- a/crates/horizon-client/src/lan/guest.rs
++++ b/crates/horizon-client/src/lan/guest.rs
+@@ -107,6 +107,9 @@ pub struct Guest {
+     pub left_reason: String,
+     pub uuid: u128,
+     pub name: String,
++    /// nxym 登录系统: this guest has authenticated (or auth is not enabled for this server).
++    /// Unauthenticated guests are limited to `/register` and `/login` (see hub.rs, lan_actions.rs).
++    pub authenticated: bool,
+     /// The profile's properties, for the player list (skins).
+     pub properties: Vec<horizon_protocol::packets::login::Property>,
+     pub entity_id: i32,
+@@ -485,6 +488,7 @@ impl Guest {
+             left_reason: String::new(),
+             uuid: j.uuid,
+             name: j.name,
++            authenticated: true,
+             properties: j.properties,
+             entity_id,
+             sender: j.sender,
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+index f9a2270..f4f96f3 100644
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -2434,6 +2434,9 @@ impl Hub {
+                 if frozen {
+                     // Frozen for a hand-over: it answers the server and nothing more.
+                     self.keep_acknowledgements(i, &mut events);
++                } else if !self.guests[i].authenticated && crate::accounts::enabled() {
++                    // nxym: 未认证玩家被冻结在原地，只能收发认证命令与 ack。
++                    self.keep_auth_packets(i, &mut events);
+                 }
+                 let started = timed.then(std::time::Instant::now);
+                 let waiting = self.guests[i].inbox.len();
+@@ -2597,6 +2600,13 @@ impl Hub {
+         if std::env::var_os("HORIZON_NET_DEBUG").is_some() {
+             log::info!("[lan] {} left: {reason}", g.name);
+         }
++        // nxym 插件: on_leave 钩子（在移出列表后执行，广播只发给仍在的玩家）。
++        #[cfg(feature = "nxym-plugin")]
++        if crate::plugin::active() {
++            let (name, uuid, conn) = (g.name.clone(), g.uuid, g.conn);
++            let actions = crate::plugin::leave_actions(&name, &uuid.to_string());
++            self.run_plugin_actions(conn, &actions);
++        }
+         if !g.placed {
+             return g;
+         }
+diff --git a/crates/horizon-client/src/lan/hub/acknowledgements.rs b/crates/horizon-client/src/lan/hub/acknowledgements.rs
+index 58f88a3..b08049e 100644
+--- a/crates/horizon-client/src/lan/hub/acknowledgements.rs
++++ b/crates/horizon-client/src/lan/hub/acknowledgements.rs
+@@ -37,4 +37,50 @@ impl Hub {
+         }
+         self.guests[i].inbox_bytes = bytes;
+     }
++
++    /// nxym 登录系统: 未认证玩家只保留 transport acknowledgements 和认证命令
++    /// (`register` / `login` / `changepassword`)，其余（移动、破坏、交互、普通聊天、
++    /// 其它命令）全部丢弃。这样玩家被"冻结"在出生点，直到完成认证。
++    pub(crate) fn keep_auth_packets(&mut self, i: usize, events: &mut Vec<HostEvent>) {
++        let enabled = crate::accounts::enabled();
++        let inbox = std::mem::take(&mut self.guests[i].inbox);
++        let mut bytes = 0;
++        for (packet, size) in inbox {
++            let keep = match &packet {
++                // Plain chat is kept so handle_chat can recognise bare `register`/`login`
++                // text; take the messages the client says it has seen, in order.
++                S::Chat(c) => {
++                    self.apply_last_seen(i, &c.last_seen, events);
++                    true
++                }
++                // A signed command is allowed only when it is an authentication command.
++                S::ChatCommandSigned(c) => {
++                    self.apply_last_seen(i, &c.last_seen, events);
++                    !enabled || crate::accounts::is_auth_command(&c.command)
++                }
++                S::ChatCommand(c) => {
++                    !enabled || crate::accounts::is_auth_command(&c.command)
++                }
++                S::ChatAck(c) => {
++                    self.chat_ack(i, c.offset, events);
++                    true
++                }
++                S::AcceptTeleportation(_)
++                | S::PlayerLoaded(_)
++                | S::ChunkBatchReceived(_)
++                | S::ClientInformation(_)
++                | S::ClientTickEnd(_)
++                | S::KeepAlive(_)
++                | S::Pong(_)
++                | S::PingRequest(_)
++                | S::ChatSessionUpdate(_) => true,
++                _ => false,
++            };
++            if keep {
++                bytes += size;
++                self.guests[i].inbox.push_back((packet, size));
++            }
++        }
++        self.guests[i].inbox_bytes = bytes;
++    }
+ }
+diff --git a/crates/horizon-client/src/lan/hub/chat.rs b/crates/horizon-client/src/lan/hub/chat.rs
+index a6c3a08..0407913 100644
+--- a/crates/horizon-client/src/lan/hub/chat.rs
++++ b/crates/horizon-client/src/lan/hub/chat.rs
+@@ -238,6 +238,36 @@ impl Hub {
+         let Some(last_seen) = self.apply_last_seen(i, &c.last_seen, events) else {
+             return;
+         };
++        // nxym 登录系统: 未认证玩家的聊天只当作认证命令处理，绝不广播。
++        if crate::accounts::enabled() && !self.guests[i].authenticated {
++            let (name, ip) = (
++                self.guests[i].name.clone(),
++                self.guests[i].address.ip().to_string(),
++            );
++            if crate::accounts::is_auth_command(&c.message) {
++                let (lines, ok) = crate::accounts::handle_line(&name, &ip, &c.message);
++                if ok {
++                    self.guests[i].authenticated = true;
++                }
++                for line in lines {
++                    self.guests[i].send(&C::SystemChat(play::SystemChat {
++                        content: horizon_client::lan::data::component_nbt(
++                            &Text::legacy(&line).component(),
++                        ),
++                        overlay: false,
++                    }));
++                }
++            } else {
++                self.guests[i].send(&C::SystemChat(play::SystemChat {
++                    content: horizon_client::lan::data::component_nbt(
++                        &Text::legacy("§c[ nxym ] 请先输入 /register <密码> 注册或 /login <密码> 登录，然后才能聊天")
++                            .component(),
++                    ),
++                    overlay: false,
++                }));
++            }
++            return;
++        }
+         if !self.try_handle_chat(i, &c.message, false) {
+             return;
+         }
+@@ -306,6 +336,13 @@ impl Hub {
+         };
+         let line = format!("<{name}> {}", message.content);
+         self.broadcast_chat(&message, &bound, line, events);
++        // nxym 插件: 聊天关键词触发器（原消息已广播，这里只追加动作，不吞消息）。
++        #[cfg(feature = "nxym-plugin")]
++        if crate::plugin::active() {
++            let conn = self.guests[i].conn;
++            let actions = crate::plugin::chat_actions(&message.content, &name, &uuid.to_string());
++            self.run_plugin_actions(conn, &actions);
++        }
+         events.push(HostEvent::PlayerChat {
+             sender: uuid,
+             text: message.content,
+diff --git a/crates/horizon-client/src/lib.rs b/crates/horizon-client/src/lib.rs
+index 352843f..6878092 100644
+--- a/crates/horizon-client/src/lib.rs
++++ b/crates/horizon-client/src/lib.rs
+@@ -1,7 +1,8 @@
+ //! Gameplay and startup, above the reusable client library.
+ // No `#![recursion_limit]` or other inner attribute horizon-mixins doesn't know here: the
+ // launcher's horizon-mixins then rejects every native mod targeting this crate (#8169).
+-#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
++// Patched for Linux headless server build: the Android-port fork calls unsafe mod loaders here.
++#![cfg_attr(not(target_os = "android"), allow(unsafe_code))]
+ extern crate self as horizon_client;
+ pub use horizon_client_lib::*;
+ pub mod entry;

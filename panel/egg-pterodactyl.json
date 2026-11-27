@@ -1,0 +1,35 @@
+{
+  "_comment": "Pterodactyl / Pelican 面板 Egg 示例 —— 用于在面板中托管本 Horizon Rust 服务端。导入方式: 面板后台 → Eggs → Import Egg, 粘贴本文件内容。",
+  "name": "Horizon (Minecraft Java 26.3, Rust)",
+  "description": "开箱即用的 Horizon Rust 服务端, 内置 nxym 插件(登录/注册/Chunky)与多线程区块生成。协议 777。",
+  "features": null,
+  "docker_images": {
+    "ghcr.io/pterodactyl/yolks:java_21": "Java 21 (仅需 glibc, 服务端本身不需要 Java)"
+  },
+  "file_configuration": [],
+  "startup": {
+    "done": "Done \\(",
+    "user_editable": true
+  },
+  "startup_cmd": "./start.sh run",
+  "variables": [
+    {
+      "name": "区块生成线程数 (HORIZON_JOB_THREADS)",
+      "description": "区块生成 worker 数, 留空则自动取容器 CPU 核数。建议等于容器 CPU 限额。",
+      "env_variable": "HORIZON_JOB_THREADS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": ["nullable"]
+    },
+    {
+      "name": "全局 worker 核数 (HORIZON_WORKER_THREADS)",
+      "description": "并行 tick 等阶段的核数上限, 留空自动取容器 CPU 核数。",
+      "env_variable": "HORIZON_WORKER_THREADS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": ["nullable"]
+    }
+  ]
+}
